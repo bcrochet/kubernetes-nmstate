@@ -1,0 +1,13 @@
+kind: ImageStream
+apiVersion: image.openshift.io/v1
+spec:
+  tags:
+  - name: kubernetes-nmstate-operator
+    from:
+      kind: DockerImage
+      Name: quay.io/openshift/origin-kubernetes-nmstate-operator
+  - name: kubernetes-nmstate-handler
+    from:
+      kind: DockerImage
+      Name: quay.io/openshift/origin-kubernetes-nmstate-handler
+
