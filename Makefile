@@ -56,7 +56,6 @@ export KUBECTL ?= ./cluster/kubectl.sh
 
 KUBECTL ?= ./cluster/kubectl.sh
 GINKGO ?= $(GOBIN)/ginkgo
-CONTROLLER_GEN ?= $(GOBIN)/controller-gen
 export GITHUB_RELEASE ?= $(GOBIN)/github-release
 export RELEASE_NOTES ?= $(GOBIN)/release-notes
 GOFMT := $(GOBIN)/gofmt
@@ -68,6 +67,23 @@ export MANIFESTS_DIR ?= build/_output/manifests
 
 # Produce CRDs that work back to Kubernetes 1.11 (no version conversion)
 CRD_OPTIONS ?= "crd:trivialVersions=true"
+
+# Current Operator version
+VERSION ?= 0.0.1
+# Default bundle image tag
+BUNDLE_IMG ?= $(IMAGE_REGISTRY)/$(IMAGE_REPO)/kubernetes-nmstate-operator-bundle:$(VERSION)
+# Options for 'bundle-build'
+ifneq ($(origin CHANNELS), undefined)
+BUNDLE_CHANNELS := --channels=$(CHANNELS)
+endif
+ifneq ($(origin DEFAULT_CHANNEL), undefined)
+BUNDLE_DEFAULT_CHANNEL := --default-channel=$(DEFAULT_CHANNEL)
+endif
+BUNDLE_METADATA_OPTS ?= $(BUNDLE_CHANNELS) $(BUNDLE_DEFAULT_CHANNEL)
+
+INDEX_VERSION ?= 1.0.0
+# Default index image tag
+INDEX_IMG ?= $(IMAGE_REGISTRY)/$(IMAGE_REPO)/kubernetes-nmstate-operator-index:$(INDEX_VERSION)
 
 all: check handler
 
@@ -101,13 +117,11 @@ $(GITHUB_RELEASE): go.mod
 	$(MAKE) tools
 $(RELEASE_NOTES): go.mod
 	$(MAKE) tools
-$(CONTROLLER_GEN): go.mod
-	$(MAKE) tools
 
-gen-k8s: $(CONTROLLER_GEN)
+gen-k8s: controller-gen
 	$(CONTROLLER_GEN) object:headerFile="hack/boilerplate.go.txt" paths="./..."
 
-gen-crds: $(CONTROLLER_GEN)
+gen-crds: controller-gen
 	$(CONTROLLER_GEN) $(CRD_OPTIONS) paths="./..." output:crd:artifacts:config=deploy/crds
 
 check-gen: generate
@@ -177,6 +191,45 @@ vendor: $(GO)
 tools: $(GO)
 	./hack/install-tools.sh
 
+# Generate bundle manifests and metadata, then validate generated files.
+bundle: gen-crds manifests
+	operator-sdk generate bundle -q --overwrite --version $(VERSION) $(BUNDLE_METADATA_OPTS) --deploy-dir $(MANIFESTS_DIR) --crds-dir deploy/crds
+	operator-sdk bundle validate ./bundle
+
+# Build the bundle image.
+bundle-build:
+	$(IMAGE_BUILDER) build -f bundle.Dockerfile -t $(BUNDLE_IMG) .
+
+# Build the index
+index-build: bundle-build
+	opm index add --bundles $(BUNDLE_IMG) --tag $(INDEX_IMG)
+
+bundle-push: bundle-build
+	$(IMAGE_BUILDER) push $(BUNDLE_IMG)
+
+index-push: index-build
+	$(IMAGE_BUILDER) push $(INDEX_IMG)
+
+olm-push: bundle-push index-push
+
+# find or download controller-gen
+# download controller-gen if necessary
+controller-gen: $(GO)
+ifeq (, $(shell which controller-gen))
+		@{ \
+		set -e ;\
+		unset GOFLAGS ;\
+		CONTROLLER_GEN_TMP_DIR=$$(mktemp -d) ;\
+		cd $$CONTROLLER_GEN_TMP_DIR ;\
+		$(GO) mod init tmp ;\
+		$(GO) get sigs.k8s.io/controller-tools/cmd/controller-gen@v0.4.0 ;\
+		rm -rf $$CONTROLLER_GEN_TMP_DIR ;\
+		}
+CONTROLLER_GEN=$(GOBIN)/controller-gen
+else
+CONTROLLER_GEN=$(shell which controller-gen)
+endif
+
 .PHONY: \
 	all \
 	check \
@@ -199,5 +252,7 @@ tools: $(GO)
 	vendor \
 	whitespace-check \
 	whitespace-format \
-	manifests \
-	tools
+	generate-manifests \
+	tools \
+	bundle \
+	bundle-build
